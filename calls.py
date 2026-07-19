@@ -223,18 +223,25 @@ async def run_call(websocket: WebSocket, state: "CallState", db: AsyncSession, c
         "&filler_words=true"
     )
 
-    async with websockets.connect(
-        DEEPGRAM_URL + deepgram_params,
-        extra_headers=deepgram_headers
-    ) as dg_ws:
-        state.deepgram_ws = dg_ws
+    try:
+        async with asyncio.timeout(10):  # fail loudly instead of hanging forever
+            async with websockets.connect(
+                DEEPGRAM_URL + deepgram_params,
+                extra_headers=deepgram_headers
+            ) as dg_ws:
+                state.deepgram_ws = dg_ws
+                print(f"[DEEPGRAM] Connected for call {state.call_sid}")
 
-        # Run tasks concurrently
-        await asyncio.gather(
-            receive_twilio_audio(websocket, state),
-            process_speech(websocket, state, db),
-            send_greeting(websocket, state),
-        )
+                # Run tasks concurrently
+                await asyncio.gather(
+                    receive_twilio_audio(websocket, state),
+                    process_speech(websocket, state, db),
+                    send_greeting(websocket, state),
+                )
+    except asyncio.TimeoutError:
+        print(f"[DEEPGRAM ERROR] Connection timed out after 10s for call {state.call_sid} — check DEEPGRAM_API_KEY")
+    except Exception as e:
+        print(f"[DEEPGRAM ERROR] Failed to connect: {type(e).__name__}: {e}")
 
 
 async def receive_twilio_audio(websocket: WebSocket, state: "CallState"):
