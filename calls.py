@@ -208,8 +208,12 @@ async def run_call(websocket: WebSocket, state: "CallState", db: AsyncSession, c
     3. send_greeting — fires the opening greeting as soon as the call connects
     """
     # Open Deepgram STT connection
+    dg_key = os.environ.get("DEEPGRAM_API_KEY", "")
+    if not dg_key:
+        print(f"[DEEPGRAM ERROR] DEEPGRAM_API_KEY is empty or not set in environment — cannot connect")
+        return
     deepgram_headers = {
-        "Authorization": f"Token {os.environ['DEEPGRAM_API_KEY']}"
+        "Authorization": f"Token {dg_key}"
     }
     deepgram_params = (
         "?model=nova-2"
@@ -461,7 +465,7 @@ async def stream_tts_chunk(websocket: WebSocket, state: "CallState", text: str):
 
     This is called sentence-by-sentence to minimize latency.
     """
-    voice_id = state.persona.get("voice_id", "21m00Tcm4TlvDq8ikWAM")
+    voice_id = state.persona.get("voice_id", "I571sUNz6E53D5YaJgVg")
     stability = state.persona.get("stability", 0.5)
     similarity_boost = state.persona.get("similarity_boost", 0.75)
     speaking_rate = state.persona.get("speaking_rate", 1.0)
