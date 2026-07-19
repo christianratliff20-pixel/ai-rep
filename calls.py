@@ -29,18 +29,20 @@ import json
 import os
 import time
 import audioop
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
 import websockets
 from anthropic import AsyncAnthropic
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
 from fastapi.responses import Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from twilio.rest import Client as TwilioClient
 from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 
-from database import get_db, CallLog, Client, KnowledgeBaseChunk
+from database import get_db, CallLog, Organization, KnowledgeBaseChunk
 
 router = APIRouter()
 
@@ -138,40 +140,40 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
     """
     await websocket.accept()
 
-    # Load client settings and knowledge base from DB
-    client = await db.get(Client, client_id)
-    if not client:
-        await websocket.close(1008, "Client not found")
+    # Load org settings and knowledge base from DB
+    org = await db.get(Organization, client_id)
+    if not org:
+        await websocket.close(1008, "Organization not found")
         return
 
     kb_chunks = await db.execute(
         select(KnowledgeBaseChunk)
-        .where(KnowledgeBaseChunk.client_id == client_id)
-        .where(KnowledgeBaseChunk.active == True)
+        .where(KnowledgeBaseChunk.org_id == client_id)
+        .where(KnowledgeBaseChunk.is_active == True)
         .limit(40)  # Stay within Claude's context budget
     )
     knowledge_base = "\n\n".join(chunk.text for chunk in kb_chunks.scalars())
 
     # Build the system prompt — this is what makes your AI behave like this specific business
-    settings = client.settings or {}
+    settings = org.settings or {}
     persona = settings.get("persona", {})
-    system_prompt = build_system_prompt(client, persona, knowledge_base)
+    system_prompt = build_system_prompt(org, persona, knowledge_base)
 
     # Initialize call state
     state = CallState(
         client_id=client_id,
         call_sid=call_sid,
-        client=client,
+        client=org,
         persona=persona,
         system_prompt=system_prompt,
     )
 
     # Log call start
     call_log = CallLog(
-        client_id=client_id,
+        org_id=client_id,
         call_sid=call_sid,
         caller_number=state.caller_number,
-        started_at=time.time(),
+        started_at=datetime.now(timezone.utc),
         status="active",
     )
     db.add(call_log)
@@ -185,8 +187,8 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
         print(f"[CALL ERROR] {call_sid}: {e}")
     finally:
         # Finalize call log
-        call_log.ended_at = time.time()
-        call_log.duration = int(call_log.ended_at - call_log.started_at)
+        call_log.ended_at = datetime.now(timezone.utc)
+        call_log.duration_seconds = int((call_log.ended_at - call_log.started_at).total_seconds())
         call_log.transcript = state.transcript
         call_log.status = "completed"
         call_log.outcome = state.outcome
@@ -752,7 +754,7 @@ async def broadcast_call_ended(client_id: str, call_sid: str, call_log):
     await broadcast_to_dashboard(client_id, {
         "type": "call_ended",
         "call_sid": call_sid,
-        "duration": call_log.duration,
+        "duration": call_log.duration_seconds,
         "outcome": call_log.outcome,
         "lead_score": call_log.lead_score,
         "sentiment": call_log.sentiment,
