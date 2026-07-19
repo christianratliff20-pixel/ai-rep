@@ -151,8 +151,13 @@ async def seed_database():
             print(f"[SEED] ✓ Operator account created: {OPERATOR_EMAIL}")
 
         # ── Seed state compliance if table is empty ──────────────
-        result = await db.execute(text("SELECT COUNT(*) FROM state_compliance"))
-        count = result.scalar()
+        try:
+            result = await db.execute(text("SELECT COUNT(*) FROM state_compliance"))
+            count = result.scalar()
+        except Exception as e:
+            print(f"[SEED] state_compliance table not found — skipping ({e})")
+            await db.rollback()
+            count = None
 
         if count == 0:
             for state in STATE_COMPLIANCE:
