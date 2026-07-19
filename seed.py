@@ -116,8 +116,8 @@ async def seed_database():
             # ── Create operator org ─────────────────────────────
             org_id = uuid.uuid4()
             await db.execute(text("""
-                INSERT INTO organizations (id, name, business_type, plan, plan_status, onboarding_complete, settings)
-                VALUES (:id, :name, :type, :plan, :status, :onboarding, :settings::jsonb)
+                INSERT INTO organizations (id, name, business_type, plan, plan_status, onboarding_complete, onboarding_step, settings)
+                VALUES (:id, :name, :type, :plan, :status, :onboarding, :step, CAST(:settings AS jsonb))
             """), {
                 "id": str(org_id),
                 "name": "Platform Operator",
@@ -125,6 +125,7 @@ async def seed_database():
                 "plan": "operator",
                 "status": "active",
                 "onboarding": True,
+                "step": 1,
                 "settings": "{}",
             })
 
