@@ -493,7 +493,8 @@ async def stream_tts_chunk(websocket: WebSocket, state: "CallState", text: str):
         async with httpx.AsyncClient(timeout=10.0) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as response:
                 if response.status_code != 200:
-                    print(f"[ELEVENLABS ERROR] {response.status_code}")
+                    error_body = await response.aread()
+                    print(f"[ELEVENLABS ERROR] {response.status_code}: {error_body.decode('utf-8', errors='replace')}")
                     return
 
                 # Stream audio chunks to Twilio
