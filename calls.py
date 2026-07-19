@@ -27,6 +27,7 @@ import asyncio
 import base64
 import json
 import os
+import sys
 import time
 import audioop
 from datetime import datetime, timezone
@@ -45,6 +46,11 @@ from twilio.twiml.voice_response import VoiceResponse, Connect, Stream
 from database import get_db, CallLog, Organization, KnowledgeBaseChunk
 
 router = APIRouter()
+
+# Force unbuffered stdout — without this, print() output can be delayed or
+# lost in some hosting environments, making it look like code never ran
+# when it actually did. This guarantees every print appears immediately.
+sys.stdout.reconfigure(line_buffering=True)
 
 # ── CLIENTS ────────────────────────────────────────────────
 twilio_client = TwilioClient(
@@ -79,12 +85,25 @@ async def inbound_call(client_id: str, request: Request):
     call_sid = form.get("CallSid", "")
     caller_number = form.get("From", "")
 
+    # 1. Get the base URL from the environment (safest method on Render)
+    # Make sure BASE_URL in Render is set to your actual public domain (e.g., https://myapp.onrender.com)
+    base_url = os.environ.get("BASE_URL", f"https://{request.headers.get('host')}")
+
+    # 2. Convert https:// to wss://
+    ws_host = base_url.replace("https://", "wss://").replace("http://", "ws://")
+
+    # 3. Build the URL (Check this! If main.py uses a prefix like /api, add it here!)
+    ws_url = f"{ws_host}/ws/call/{client_id}/{call_sid}"
+
+    # MASSIVE DEBUG LOG: Look for this in your Render logs!
+    print(f"==================================================")
+    print(f"[WEBHOOK HIT] CallSid: {call_sid}")
+    print(f"[WEBHOOK HIT] Telling Twilio to stream audio to: {ws_url}")
+    print(f"==================================================")
+
     # Build TwiML response
     response = VoiceResponse()
     connect = Connect()
-
-    # This URL must be wss:// — Twilio only streams to WebSocket
-    ws_url = f"wss://{request.headers.get('host')}/ws/call/{client_id}/{call_sid}"
     stream = Stream(url=ws_url)
     stream.parameter(name="client_id", value=client_id)
     stream.parameter(name="caller_number", value=caller_number)
