@@ -115,9 +115,10 @@ async def seed_database():
         else:
             # ── Create operator org ─────────────────────────────
             org_id = uuid.uuid4()
+            now = datetime.now(timezone.utc)
             await db.execute(text("""
-                INSERT INTO organizations (id, name, business_type, plan, plan_status, onboarding_complete, onboarding_step, settings)
-                VALUES (:id, :name, :type, :plan, :status, :onboarding, :step, CAST(:settings AS jsonb))
+                INSERT INTO organizations (id, name, business_type, plan, plan_status, onboarding_complete, onboarding_step, settings, created_at, updated_at)
+                VALUES (:id, :name, :type, :plan, :status, :onboarding, :step, CAST(:settings AS jsonb), :created_at, :updated_at)
             """), {
                 "id": str(org_id),
                 "name": "Platform Operator",
@@ -127,13 +128,15 @@ async def seed_database():
                 "onboarding": True,
                 "step": 1,
                 "settings": "{}",
+                "created_at": now,
+                "updated_at": now,
             })
 
             # ── Create operator user ────────────────────────────
             user_id = uuid.uuid4()
             await db.execute(text("""
-                INSERT INTO users (id, org_id, email, password_hash, name, role, is_active, invite_accepted)
-                VALUES (:id, :org_id, :email, :hash, :name, :role, true, true)
+                INSERT INTO users (id, org_id, email, password_hash, name, role, is_active, invite_accepted, created_at, updated_at)
+                VALUES (:id, :org_id, :email, :hash, :name, :role, true, true, :created_at, :updated_at)
             """), {
                 "id": str(user_id),
                 "org_id": str(org_id),
@@ -141,6 +144,8 @@ async def seed_database():
                 "hash": OPERATOR_HASH,
                 "name": OPERATOR_NAME,
                 "role": "operator",
+                "created_at": now,
+                "updated_at": now,
             })
 
             print(f"[SEED] ✓ Operator account created: {OPERATOR_EMAIL}")
