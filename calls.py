@@ -138,26 +138,36 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
     Called for every active call. Orchestrates the full pipeline:
     Twilio audio → Deepgram STT → Claude → ElevenLabs → Twilio audio
     """
+    print(f"[CHECKPOINT 1] call_websocket entered for {call_sid}")
     await websocket.accept()
+    print(f"[CHECKPOINT 2] websocket.accept() completed")
 
-    # Load org settings and knowledge base from DB
-    org = await db.get(Organization, client_id)
-    if not org:
-        await websocket.close(1008, "Organization not found")
+    try:
+        # Load org settings and knowledge base from DB
+        org = await db.get(Organization, client_id)
+        print(f"[CHECKPOINT 3] org lookup completed: {org.name if org else 'NOT FOUND'}")
+        if not org:
+            await websocket.close(1008, "Organization not found")
+            return
+
+        kb_chunks = await db.execute(
+            select(KnowledgeBaseChunk)
+            .where(KnowledgeBaseChunk.org_id == client_id)
+            .where(KnowledgeBaseChunk.is_active == True)
+            .limit(40)  # Stay within Claude's context budget
+        )
+        knowledge_base = "\n\n".join(chunk.text for chunk in kb_chunks.scalars())
+        print(f"[CHECKPOINT 4] knowledge base query completed")
+
+        # Build the system prompt — this is what makes your AI behave like this specific business
+        settings = org.settings or {}
+        persona = settings.get("persona", {})
+        system_prompt = build_system_prompt(org, persona, knowledge_base)
+        print(f"[CHECKPOINT 5] system prompt built")
+    except Exception as e:
+        print(f"[CHECKPOINT ERROR] Failed during setup: {type(e).__name__}: {e}")
+        await websocket.close(1011, "Internal error")
         return
-
-    kb_chunks = await db.execute(
-        select(KnowledgeBaseChunk)
-        .where(KnowledgeBaseChunk.org_id == client_id)
-        .where(KnowledgeBaseChunk.is_active == True)
-        .limit(40)  # Stay within Claude's context budget
-    )
-    knowledge_base = "\n\n".join(chunk.text for chunk in kb_chunks.scalars())
-
-    # Build the system prompt — this is what makes your AI behave like this specific business
-    settings = org.settings or {}
-    persona = settings.get("persona", {})
-    system_prompt = build_system_prompt(org, persona, knowledge_base)
 
     # Initialize call state
     state = CallState(
