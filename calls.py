@@ -65,25 +65,17 @@ MAX_CALL_DURATION = 600     # 10 minutes hard limit
 
 # ══════════════════════════════════════════════════════════════
 # 1. TWILIO INBOUND WEBHOOK
-#    Twilio hits this when a call comes in to your number.
-#    We return TwiML that tells Twilio to connect to our WebSocket.
 # ══════════════════════════════════════════════════════════════
 
 @router.post("/calls/inbound/{client_id}")
 async def inbound_call(client_id: str, request: Request):
-    """
-    Twilio webhook. Returns TwiML that opens a Media Stream
-    to our WebSocket endpoint so we can process audio in real time.
-    """
     form = await request.form()
     call_sid = form.get("CallSid", "")
     caller_number = form.get("From", "")
 
-    # Build TwiML response
     response = VoiceResponse()
     connect = Connect()
 
-    # This URL must be wss:// — Twilio only streams to WebSocket
     ws_url = f"wss://{request.headers.get('host')}/ws/call/{client_id}/{call_sid}"
     stream = Stream(url=ws_url)
     stream.parameter(name="client_id", value=client_id)
@@ -96,23 +88,14 @@ async def inbound_call(client_id: str, request: Request):
 
 # ══════════════════════════════════════════════════════════════
 # 2. OUTBOUND TEST CALL
-#    Initiates a call FROM your Twilio number TO the user's phone.
-#    When they pick up, routes through the same AI pipeline.
 # ══════════════════════════════════════════════════════════════
 
 @router.post("/clients/{client_id}/test-call")
 async def initiate_test_call(client_id: str, body: dict, db: AsyncSession = Depends(get_db)):
-    """
-    Places an outbound call to the provided phone number.
-    When answered, it goes through the real AI pipeline so the
-    business owner can hear exactly what callers will hear.
-    """
     phone = body.get("phone")
     if not phone:
         raise HTTPException(400, "phone is required")
 
-    # Build the inbound URL — this is the same TwiML endpoint
-    # When the called person answers, Twilio treats it like an inbound call
     base_url = os.environ.get("BASE_URL", "https://yourapp.onrender.com")
     twiml_url = f"{base_url}/calls/inbound/{client_id}?test=true"
 
@@ -128,22 +111,15 @@ async def initiate_test_call(client_id: str, body: dict, db: AsyncSession = Depe
 
 # ══════════════════════════════════════════════════════════════
 # 3. WEBSOCKET CALL HANDLER
-#    This is the core of the entire system.
-#    Runs for the full duration of every call.
 # ══════════════════════════════════════════════════════════════
 
 @router.websocket("/ws/call/{client_id}/{call_sid}")
 async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db: AsyncSession = Depends(get_db)):
-    """
-    Called for every active call. Orchestrates the full pipeline:
-    Twilio audio → Deepgram STT → Claude → ElevenLabs → Twilio audio
-    """
     print(f"[CHECKPOINT 1] call_websocket entered for {call_sid}")
     await websocket.accept()
     print(f"[CHECKPOINT 2] websocket.accept() completed")
 
     try:
-        # Load org settings and knowledge base from DB
         org = await db.get(Organization, client_id)
         print(f"[CHECKPOINT 3] org lookup completed: {org.name if org else 'NOT FOUND'}")
         if not org:
@@ -154,12 +130,11 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
             select(KnowledgeBaseChunk)
             .where(KnowledgeBaseChunk.org_id == client_id)
             .where(KnowledgeBaseChunk.is_active == True)
-            .limit(40)  # Stay within Claude's context budget
+            .limit(40)
         )
         knowledge_base = "\n\n".join(chunk.text for chunk in kb_chunks.scalars())
         print(f"[CHECKPOINT 4] knowledge base query completed")
 
-        # Build the system prompt — this is what makes your AI behave like this specific business
         settings = org.settings or {}
         persona = settings.get("persona", {})
         system_prompt = build_system_prompt(org, persona, knowledge_base)
@@ -169,7 +144,6 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
         await websocket.close(1011, "Internal error")
         return
 
-    # Initialize call state
     state = CallState(
         client_id=client_id,
         call_sid=call_sid,
@@ -178,7 +152,6 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
         system_prompt=system_prompt,
     )
 
-    # Log call start
     call_log = CallLog(
         org_id=client_id,
         call_sid=call_sid,
@@ -196,7 +169,6 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
     except Exception as e:
         print(f"[CALL ERROR] {call_sid}: {e}")
     finally:
-        # Finalize call log
         call_log.ended_at = datetime.now(timezone.utc)
         call_log.duration_seconds = int((call_log.ended_at - call_log.started_at).total_seconds())
         call_log.transcript = state.transcript
@@ -206,18 +178,10 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
         call_log.sentiment = state.final_sentiment
         await db.commit()
 
-        # Notify dashboard via separate WebSocket broadcast
         await broadcast_call_ended(client_id, call_sid, call_log)
 
 
 async def run_call(websocket: WebSocket, state: "CallState", db: AsyncSession, call_log: CallLog):
-    """
-    Main call loop. Manages three concurrent tasks:
-    1. receive_twilio_audio — reads audio from Twilio, pipes to Deepgram
-    2. process_speech — reads Deepgram transcripts, runs Claude, generates TTS
-    3. send_greeting — fires the opening greeting as soon as the call connects
-    """
-    # Open Deepgram STT connection
     dg_key = os.environ.get("DEEPGRAM_API_KEY", "")
     if not dg_key:
         print(f"[DEEPGRAM ERROR] DEEPGRAM_API_KEY is empty or not set in environment — cannot connect")
@@ -238,7 +202,7 @@ async def run_call(websocket: WebSocket, state: "CallState", db: AsyncSession, c
     )
 
     try:
-        async with asyncio.timeout(10):  # only time-limit the connection attempt itself
+        async with asyncio.timeout(10):
             dg_ws = await websockets.connect(
                 DEEPGRAM_URL + deepgram_params,
                 extra_headers=deepgram_headers
@@ -254,7 +218,6 @@ async def run_call(websocket: WebSocket, state: "CallState", db: AsyncSession, c
     print(f"[DEEPGRAM] Connected for call {state.call_sid}")
 
     try:
-        # Run tasks concurrently — no timeout here, calls can run for their natural duration
         await asyncio.gather(
             receive_twilio_audio(websocket, state),
             process_speech(websocket, state, db),
@@ -265,11 +228,6 @@ async def run_call(websocket: WebSocket, state: "CallState", db: AsyncSession, c
 
 
 async def receive_twilio_audio(websocket: WebSocket, state: "CallState"):
-    """
-    Reads raw audio from Twilio's Media Stream WebSocket.
-    Twilio sends base64-encoded mulaw audio in JSON events.
-    We decode and forward to Deepgram.
-    """
     async for message in websocket.iter_text():
         try:
             data = json.loads(message)
@@ -279,24 +237,20 @@ async def receive_twilio_audio(websocket: WebSocket, state: "CallState"):
                 print(f"[TWILIO] Connected: {state.call_sid}")
 
             elif event == "start":
-                # Twilio tells us about the stream configuration
                 stream_sid = data["start"]["streamSid"]
                 state.stream_sid = stream_sid
                 state.caller_number = data["start"]["customParameters"].get("caller_number", "Unknown")
                 print(f"[TWILIO] Stream started: {stream_sid}")
 
             elif event == "media":
-                # Decode audio and forward to Deepgram
                 payload = data["media"]["payload"]
                 audio_bytes = base64.b64decode(payload)
 
-                # Track whether caller is speaking (for silence detection)
                 rms = audioop.rms(audio_bytes, 1)
                 if rms > SILENCE_THRESHOLD:
                     state.last_speech_time = time.time()
                     state.caller_speaking = True
 
-                # Forward to Deepgram
                 if state.deepgram_ws and not state.ai_speaking:
                     await state.deepgram_ws.send(audio_bytes)
 
@@ -310,15 +264,10 @@ async def receive_twilio_audio(websocket: WebSocket, state: "CallState"):
 
 
 async def process_speech(websocket: WebSocket, state: "CallState", db: AsyncSession):
-    """
-    Reads transcripts from Deepgram and runs the full AI pipeline:
-    Deepgram transcript → Claude API → ElevenLabs TTS → Twilio audio
-    """
     async for message in state.deepgram_ws:
         try:
             result = json.loads(message)
 
-            # Handle Deepgram transcript events
             if result.get("type") == "Results":
                 alternatives = result.get("channel", {}).get("alternatives", [])
                 if not alternatives:
@@ -328,10 +277,8 @@ async def process_speech(websocket: WebSocket, state: "CallState", db: AsyncSess
                 is_final = result.get("is_final", False)
                 speech_final = result.get("speech_final", False)
 
-                # Update partial transcript for UI streaming
                 if transcript:
                     state.current_utterance = transcript
-                    # Broadcast partial transcript to dashboard
                     await broadcast_transcript_update(
                         state.client_id,
                         state.call_sid,
@@ -340,11 +287,9 @@ async def process_speech(websocket: WebSocket, state: "CallState", db: AsyncSess
                         is_final=False
                     )
 
-                # Only process when Deepgram signals end of utterance
                 if (is_final and speech_final and transcript and not state.ai_speaking):
                     state.caller_speaking = False
 
-                    # Add to conversation history
                     state.transcript.append({
                         "speaker": "caller",
                         "text": transcript,
@@ -356,10 +301,8 @@ async def process_speech(websocket: WebSocket, state: "CallState", db: AsyncSess
                         speaker="caller", text=transcript, is_final=True
                     )
 
-                    # Run Claude and speak the response
                     await generate_and_speak(websocket, state, transcript)
 
-            # Handle Deepgram errors
             elif result.get("type") == "Error":
                 print(f"[DEEPGRAM ERROR] {result}")
 
@@ -371,12 +314,7 @@ async def process_speech(websocket: WebSocket, state: "CallState", db: AsyncSess
 
 
 async def send_greeting(websocket: WebSocket, state: "CallState"):
-    """
-    Fires the opening greeting as soon as the stream is established.
-    Waits until stream_sid is set (stream started event received).
-    """
-    # Wait for stream to start
-    for _ in range(50):  # max 5 second wait
+    for _ in range(50):
         if state.stream_sid:
             break
         await asyncio.sleep(0.1)
@@ -384,7 +322,6 @@ async def send_greeting(websocket: WebSocket, state: "CallState"):
     if not state.stream_sid:
         return
 
-    # Small pause before greeting — feels more natural
     await asyncio.sleep(0.3)
 
     greeting = state.persona.get("greeting_script", "Thank you for calling. How can I help you today?")
@@ -395,41 +332,28 @@ async def send_greeting(websocket: WebSocket, state: "CallState"):
 
 
 async def generate_and_speak(websocket: WebSocket, state: "CallState", caller_text: str):
-    """
-    The core intelligence step:
-    1. Build messages array with full conversation history
-    2. Call Claude API with streaming
-    3. Stream response to ElevenLabs TTS in chunks
-    4. Stream audio back to Twilio in real time
-
-    Latency target: < 800ms from end of caller speech to first AI audio byte
-    """
     state.ai_speaking = True
 
-    # Check for escalation triggers
     escalation = await check_escalation_triggers(state, caller_text)
     if escalation:
         await handle_escalation(websocket, state, escalation)
         state.ai_speaking = False
         return
 
-    # Build Claude messages
     messages = []
     for turn in state.conversation_history:
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": caller_text})
 
-    # Add to history
     state.conversation_history.append({"role": "user", "content": caller_text})
 
-    # Stream from Claude
     full_response = ""
     sentence_buffer = ""
 
     try:
         async with anthropic_client.messages.stream(
             model="claude-sonnet-4-6",
-            max_tokens=400,  # Keep responses concise for voice
+            max_tokens=400,
             system=state.system_prompt,
             messages=messages,
         ) as stream:
@@ -437,25 +361,20 @@ async def generate_and_speak(websocket: WebSocket, state: "CallState", caller_te
                 full_response += text_chunk
                 sentence_buffer += text_chunk
 
-                # Send to TTS as soon as we have a complete sentence
-                # This reduces latency significantly — don't wait for full response
                 if any(sentence_buffer.rstrip().endswith(p) for p in ['.', '?', '!', ',', ';']):
-                    if len(sentence_buffer.strip()) > 10:  # avoid tiny fragments
+                    if len(sentence_buffer.strip()) > 10:
                         await stream_tts_chunk(websocket, state, sentence_buffer.strip())
                         sentence_buffer = ""
 
-            # Flush any remaining text
             if sentence_buffer.strip():
                 await stream_tts_chunk(websocket, state, sentence_buffer.strip())
 
     except Exception as e:
         print(f"[CLAUDE ERROR] {e}")
-        # Fallback response
         await speak_text(websocket, state, "I'm sorry, I had trouble with that. Could you repeat what you said?")
         state.ai_speaking = False
         return
 
-    # Save AI response to transcript and history
     state.conversation_history.append({"role": "assistant", "content": full_response})
     state.transcript.append({
         "speaker": "ai",
@@ -468,19 +387,12 @@ async def generate_and_speak(websocket: WebSocket, state: "CallState", caller_te
         speaker="ai", text=full_response, is_final=True
     )
 
-    # Detect outcomes from Claude's response
     await detect_outcomes(state, full_response)
 
     state.ai_speaking = False
 
 
 async def stream_tts_chunk(websocket: WebSocket, state: "CallState", text: str):
-    """
-    Sends a text chunk to ElevenLabs, receives streaming audio,
-    converts from mp3 to mulaw, and sends to Twilio in real time.
-
-    This is called sentence-by-sentence to minimize latency.
-    """
     voice_id = state.persona.get("voice_id", "I571sUNz6E53D5YaJgVg")
     stability = state.persona.get("stability", 0.5)
     similarity_boost = state.persona.get("similarity_boost", 0.75)
@@ -496,13 +408,13 @@ async def stream_tts_chunk(websocket: WebSocket, state: "CallState", text: str):
 
     payload = {
         "text": text,
-        "model_id": "eleven_turbo_v2",  # Lowest latency ElevenLabs model
+        "model_id": "eleven_turbo_v2",
         "voice_settings": {
             "stability": stability,
             "similarity_boost": similarity_boost,
             "speaking_rate": speaking_rate,
         },
-        "output_format": "ulaw_8000",  # Direct mulaw output — no conversion needed
+        "output_format": "ulaw_8000",
     }
 
     try:
@@ -513,12 +425,10 @@ async def stream_tts_chunk(websocket: WebSocket, state: "CallState", text: str):
                     print(f"[ELEVENLABS ERROR] {response.status_code}: {error_body.decode('utf-8', errors='replace')}")
                     return
 
-                # Stream audio chunks to Twilio
                 async for chunk in response.aiter_bytes(chunk_size=AUDIO_CHUNK_SIZE):
                     if not chunk or state.call_ended:
                         break
 
-                    # Encode as base64 and send to Twilio Media Stream
                     audio_b64 = base64.b64encode(chunk).decode("utf-8")
                     await websocket.send_json({
                         "event": "media",
@@ -528,7 +438,6 @@ async def stream_tts_chunk(websocket: WebSocket, state: "CallState", text: str):
                         }
                     })
 
-                    # Small yield to prevent blocking the event loop
                     await asyncio.sleep(0)
 
     except Exception as e:
@@ -536,7 +445,6 @@ async def stream_tts_chunk(websocket: WebSocket, state: "CallState", text: str):
 
 
 async def speak_text(websocket: WebSocket, state: "CallState", text: str, is_greeting: bool = False):
-    """Convenience wrapper for speaking a full piece of text."""
     await stream_tts_chunk(websocket, state, text)
     if is_greeting:
         state.transcript.append({
@@ -545,11 +453,6 @@ async def speak_text(websocket: WebSocket, state: "CallState", text: str, is_gre
         })
         state.conversation_history.append({"role": "assistant", "content": text})
 
-
-# ══════════════════════════════════════════════════════════════
-# 4. SYSTEM PROMPT BUILDER
-#    This is what makes each business's AI unique.
-# ══════════════════════════════════════════════════════════════
 
 def build_system_prompt(client, persona: dict, knowledge_base: str) -> str:
     name = persona.get("name", "your AI receptionist")
@@ -608,15 +511,7 @@ BUSINESS KNOWLEDGE BASE:
 """
 
 
-# ══════════════════════════════════════════════════════════════
-# 5. ESCALATION HANDLING
-# ══════════════════════════════════════════════════════════════
-
 async def check_escalation_triggers(state: "CallState", caller_text: str) -> Optional[str]:
-    """
-    Checks whether any escalation trigger is met.
-    Returns trigger type string or None.
-    """
     client_settings = state.client.settings or {}
     escalation_cfg = client_settings.get("escalation", {})
 
@@ -645,7 +540,6 @@ async def check_escalation_triggers(state: "CallState", caller_text: str) -> Opt
 
 
 async def handle_escalation(websocket: WebSocket, state: "CallState", trigger: str):
-    """Handles an escalation event — speaks transition message and transfers call."""
     client_settings = state.client.settings or {}
     escalation_cfg = client_settings.get("escalation", {})
     transfer_number = escalation_cfg.get("escalation_number", "")
@@ -669,12 +563,7 @@ async def handle_escalation(websocket: WebSocket, state: "CallState", trigger: s
     state.outcome = f"transferred_{trigger}"
 
 
-# ══════════════════════════════════════════════════════════════
-# 6. OUTCOME & LEAD SCORING
-# ══════════════════════════════════════════════════════════════
-
 async def detect_outcomes(state: "CallState", ai_response: str):
-    """Detects outcomes from the AI's response text."""
     response_lower = ai_response.lower()
 
     if any(phrase in response_lower for phrase in ["booked", "scheduled", "appointment", "confirmed for"]):
@@ -688,10 +577,6 @@ async def detect_outcomes(state: "CallState", ai_response: str):
 
 
 async def score_lead(transcript: list) -> int:
-    """
-    Uses Claude to score the lead quality 1-10 based on transcript.
-    Called after call ends.
-    """
     if not transcript or len(transcript) < 2:
         return 1
 
@@ -717,22 +602,11 @@ Respond with ONLY a number.
         return 5
 
 
-# ══════════════════════════════════════════════════════════════
-# 7. DASHBOARD BROADCASTING
-#    Sends live events to business owner's dashboard
-# ══════════════════════════════════════════════════════════════
-
-# In-memory store of dashboard WebSocket connections
-# Key: org_id, Value: set of WebSocket connections
 dashboard_connections: dict[str, set] = {}
 
 
 @router.websocket("/ws/dashboard/{org_id}")
 async def dashboard_websocket(websocket: WebSocket, org_id: str):
-    """
-    Business owner's dashboard connects here to receive live call events.
-    Events: call_started, transcript_update, call_ended, sentiment_update
-    """
     await websocket.accept()
 
     if org_id not in dashboard_connections:
@@ -740,9 +614,7 @@ async def dashboard_websocket(websocket: WebSocket, org_id: str):
     dashboard_connections[org_id].add(websocket)
 
     try:
-        # Keep alive — just wait for disconnect
         while True:
-            # Ping every 30s to detect dropped connections
             await asyncio.sleep(30)
             await websocket.send_json({"type": "ping"})
     except WebSocketDisconnect:
@@ -752,7 +624,6 @@ async def dashboard_websocket(websocket: WebSocket, org_id: str):
 
 
 async def broadcast_to_dashboard(org_id: str, event: dict):
-    """Send an event to all dashboard connections for an org."""
     if org_id not in dashboard_connections:
         return
     dead = set()
@@ -789,13 +660,7 @@ async def broadcast_call_ended(client_id: str, call_sid: str, call_log):
     })
 
 
-# ══════════════════════════════════════════════════════════════
-# 8. CALL STATE
-# ══════════════════════════════════════════════════════════════
-
 class CallState:
-    """Holds all mutable state for a single active call."""
-
     def __init__(self, client_id, call_sid, client, persona, system_prompt):
         self.client_id = client_id
         self.call_sid = call_sid
@@ -819,42 +684,3 @@ class CallState:
 
         self.outcome: Optional[str] = None
         self.final_sentiment: str = "neutral"
-
-
-# ══════════════════════════════════════════════════════════════
-# DEPLOYMENT CHECKLIST
-# ══════════════════════════════════════════════════════════════
-#
-# 1. Environment variables (all required):
-#    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER
-#    DEEPGRAM_API_KEY
-#    ANTHROPIC_API_KEY
-#    ELEVENLABS_API_KEY
-#    DATABASE_URL
-#    BASE_URL=https://your-deployed-backend.com
-#
-# 2. Your deployed backend URL MUST be HTTPS/WSS (not localhost).
-#    Twilio webhooks require a public SSL URL.
-#    Use Render, Railway, or Fly.io with their auto-SSL.
-#
-# 3. In Twilio console:
-#    Phone Number → Voice → "A call comes in" → Webhook
-#    Set to: https://your-backend.com/calls/inbound/{client_id}
-#    Method: HTTP POST
-#
-# 4. Deepgram account:
-#    Create a key at https://console.deepgram.com
-#    nova-2 model is best for English phone audio
-#
-# 5. ElevenLabs account:
-#    eleven_turbo_v2 is the lowest-latency model
-#    Voice IDs are in your ElevenLabs voice library
-#    ulaw_8000 output format = direct Twilio compatibility, no conversion
-#
-# 6. pip install requirements:
-#    pip install fastapi uvicorn websockets httpx anthropic deepgram-sdk
-#             python-twilio elevenlabs sqlalchemy asyncpg audioop-lts
-#
-# 7. Run with:
-#    uvicorn main:app --host 0.0.0.0 --port 8000 --workers 4
-#    (use multiple workers — each call is its own event loop)
