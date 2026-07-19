@@ -88,6 +88,7 @@ async def inbound_call(client_id: str, request: Request):
     # 1. Get the base URL from the environment (safest method on Render)
     # Make sure BASE_URL in Render is set to your actual public domain (e.g., https://myapp.onrender.com)
     base_url = os.environ.get("BASE_URL", f"https://{request.headers.get('host')}")
+    base_url = base_url.rstrip("/")  # strip trailing slash to avoid double-slash in ws_url
 
     # 2. Convert https:// to wss://
     ws_host = base_url.replace("https://", "wss://").replace("http://", "ws://")
