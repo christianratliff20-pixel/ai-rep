@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from auth import router as auth_router
 from calls import router as calls_router
 from billing import router as billing_router
+from core import router as core_router
 from database import engine, Base
 from seed import seed_database
 
@@ -59,6 +60,7 @@ app.add_middleware(
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(calls_router, tags=["calls"])
 app.include_router(billing_router, tags=["billing"])
+app.include_router(core_router, tags=["core"])
 
 
 @app.get("/health")

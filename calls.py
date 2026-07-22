@@ -219,6 +219,21 @@ async def call_websocket(websocket: WebSocket, client_id: str, call_sid: str, db
         # Finalize call log
         call_log.ended_at = datetime.now(timezone.utc)
         call_log.duration_seconds = int((call_log.ended_at - call_log.started_at).total_seconds())
+        # Deduct minutes from the org's prepaid balance — this is what makes
+        # the billing model real instead of just a UI number.
+        try:
+            from billing import MinutesLedger, RATES
+            minutes_used = call_log.duration_seconds / 60.0
+            if minutes_used > 0 and not call_log.is_test_call:
+                db.add(MinutesLedger(
+                    org_id=client_id,
+                    delta_minutes=-minutes_used,
+                    amount_paid=None,
+                    reason="call_usage",
+                    call_sid=call_sid,
+                ))
+        except Exception as e:
+            print(f"[BILLING ERROR] Failed to deduct minutes: {e}")
         call_log.transcript = state.transcript
         call_log.status = "completed"
         call_log.outcome = state.outcome
