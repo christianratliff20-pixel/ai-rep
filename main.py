@@ -19,6 +19,7 @@ from auth import router as auth_router
 from calls import router as calls_router
 from billing import router as billing_router
 from core import router as core_router
+from provisioning import router as provisioning_router
 from database import engine, Base
 from seed import seed_database
 
@@ -61,6 +62,7 @@ app.include_router(auth_router, prefix="/auth", tags=["auth"])
 app.include_router(calls_router, tags=["calls"])
 app.include_router(billing_router, tags=["billing"])
 app.include_router(core_router, tags=["core"])
+app.include_router(provisioning_router, tags=["provisioning"])
 
 
 @app.get("/health")
